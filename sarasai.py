@@ -1,5 +1,6 @@
-"""Iš anksto apibrėžti sąrašai, naudojami vartotojo įvestims validuoti."""
+"""Sąrašai, kuriais remiamės validuodami vartotojo įvestis."""
 
+# Populiariausi pavyzdiniai ticker'iai
 DEFAULT_TICKERS = [
     "AAPL",
     "MSFT",
@@ -11,6 +12,7 @@ DEFAULT_TICKERS = [
     "NFLX",
 ]
 
+# Rodikliai, kurie bus atvaizduoti suvestinėje lentelėje
 DEFAULT_SUMMARY_METRICS = [
     "PRICE",
     "MARKET_CAP",
@@ -35,6 +37,7 @@ DEFAULT_SUMMARY_METRICS = [
     "CASH_EQUIVALENTS",
 ]
 
+# Tik šie rodikliai turi prasmę grafikams (jie turi kelių metų istoriją)
 PLOT_METRIC_CHOICES = [
     "REVENUE",
     "NET_INCOME",
@@ -44,6 +47,7 @@ PLOT_METRIC_CHOICES = [
     "GROSS_PROFIT",
 ]
 
+# Jei vartotojas neįveda reikšmių, panaudosime ši pavyzdį
 ARGUMENTU_PAVYZDYS = [
     "AAPL",
     "MSFT",

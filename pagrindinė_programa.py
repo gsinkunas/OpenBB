@@ -1,16 +1,13 @@
-"""Programėlė, kuri naudoja yfinance ir pandas fundamentaliems duomenims rinkti.
+"""Paprastesnė programa fundamentaliems rodikliams gauti su yfinance.
 
-Struktūra paremta atskirais žodynų/listų moduliais (Dictonaries, sarasai),
-kaip buvo prašyta užduotyje. Programa leidžia:
-- saugiai surinkti pagrindinius rodiklius į DataFrame;
-- eksportuoti suvestinę į Excel;
-- formuoti grafikus pasirinktoms metrikoms;
-- peržiūrėti žalius balansų/pajamų/pinigų srautų duomenis.
+Struktūra:
+- Dictonaries.py: žodynas su visais palaikomais rodikliais.
+- sarasai.py: sąrašai su numatytaisias ticker'iais ir grafiko argumentais.
+- pagrindinė_programa.py: vartotojo sąsaja (meniu) ir logika.
 """
 
 from __future__ import annotations
 
-import warnings
 from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -22,7 +19,6 @@ import yfinance as yf
 from Dictonaries import YFINANCE_SERIJOS
 import sarasai
 
-warnings.filterwarnings("ignore", category=FutureWarning)
 plt.switch_backend("Agg")
 plt.style.use("seaborn-v0_8")
 
@@ -30,76 +26,81 @@ EXPORT_DIR = Path("eksportai")
 PLOTS_DIR = Path("grafikai")
 
 
+# ---------------------------------------------------------------------------
+# Pagalbinės funkcijos
+# ---------------------------------------------------------------------------
+
 def ensure_dir(path: Path) -> None:
-    """Sukuria direktoriją, jei jos nėra."""
+    """Sukuria katalogą, jei jo dar nėra."""
 
     path.mkdir(parents=True, exist_ok=True)
 
 
-def fetch_company_datasets(ticker: str) -> Dict[str, pd.DataFrame | dict]:
-    """Parsiunčia reikalingus yfinance duomenis vienu kartu."""
+def download_company_data(ticker: str) -> Dict[str, pd.DataFrame | dict]:
+    """Vienoje vietoje atsisiunčiame visus yfinance duomenis."""
 
     tk = yf.Ticker(ticker)
 
-    try:
-        fast_info = tk.fast_info or {}
-    except Exception:
-        fast_info = {}
-
+    fast_info = getattr(tk, "fast_info", {}) or {}
     try:
         info = tk.get_info()
     except Exception:
         info = {}
 
-    income_stmt = tk.financials if isinstance(tk.financials, pd.DataFrame) else pd.DataFrame()
-    balance_sheet = tk.balance_sheet if isinstance(tk.balance_sheet, pd.DataFrame) else pd.DataFrame()
-    cash_flow = tk.cashflow if isinstance(tk.cashflow, pd.DataFrame) else pd.DataFrame()
-
-    history = tk.history(period="max", interval="1mo", auto_adjust=False)
+    def to_df(value: object) -> pd.DataFrame:
+        return value if isinstance(value, pd.DataFrame) else pd.DataFrame()
 
     return {
-        "ticker": tk,
         "fast_info": fast_info,
         "info": info,
-        "income_stmt": income_stmt,
-        "balance_sheet": balance_sheet,
-        "cash_flow": cash_flow,
-        "history": history,
+        "income_stmt": to_df(tk.financials),
+        "balance_sheet": to_df(tk.balance_sheet),
+        "cash_flow": to_df(tk.cashflow),
     }
 
 
-def extract_statement_value(df: pd.DataFrame, field: str) -> Optional[float]:
-    """Grąžina naujausią eilutės reikšmę iš pateiktos finansinės ataskaitos."""
+def newest_statement_value(statement: pd.DataFrame, row_name: str) -> Optional[float]:
+    """Ima naujausią konkretos eilutės reikšmę iš finansinės ataskaitos."""
 
-    if df is None or df.empty or field not in df.index:
+    if statement is None or statement.empty or row_name not in statement.index:
         return None
 
-    series = df.loc[field].dropna()
-    if series.empty:
-        return None
-
-    try:
-        return float(series.iloc[0])
-    except (TypeError, ValueError):
-        return None
+    values = statement.loc[row_name].dropna()
+    return float(values.iloc[0]) if not values.empty else None
 
 
-def compute_derived_value(meta: dict, datasets: Dict[str, pd.DataFrame | dict], cache: dict) -> Optional[float]:
-    """Apskaičiuoja išvestines reikšmes (santykius, sumas ir pan.)."""
+def raw_metric_value(meta: dict, datasets: Dict[str, pd.DataFrame | dict]) -> Optional[float]:
+    """Grąžina tiesioginę reikšmę iš pasirinkto šaltinio."""
 
-    formula = meta.get("formula")
+    source = meta.get("source")
+    field = meta.get("field")
 
-    if formula == "divide":
-        numerator = resolve_metric_value(meta.get("numerator"), datasets, cache)
-        denominator = resolve_metric_value(meta.get("denominator"), datasets, cache)
-        if numerator is None or denominator in (None, 0):
+    if source in {"fast_info", "info"}:
+        return datasets.get(source, {}).get(field)
+
+    statement = datasets.get(source)
+    if isinstance(statement, pd.DataFrame):
+        return newest_statement_value(statement, field)
+
+    return None
+
+
+def formula_metric_value(meta: dict, datasets: Dict[str, pd.DataFrame | dict], cache: dict) -> Optional[float]:
+    """Apskaičiuoja santykius arba sumas pagal aprašą žodyne."""
+
+    method = meta.get("method")
+
+    if method == "divide":
+        num = get_metric_value(meta.get("numerator"), datasets, cache)
+        den = get_metric_value(meta.get("denominator"), datasets, cache)
+        if num is None or den in (None, 0):
             return None
         multiplier = meta.get("multiplier", 1)
-        return float(numerator) / float(denominator) * multiplier
+        return float(num) / float(den) * multiplier
 
-    if formula == "add":
+    if method == "sum":
         operands = meta.get("operands", [])
-        values = [resolve_metric_value(code, datasets, cache) for code in operands]
+        values = [get_metric_value(code, datasets, cache) for code in operands]
         if any(value is None for value in values):
             return None
         return float(sum(values))
@@ -107,12 +108,11 @@ def compute_derived_value(meta: dict, datasets: Dict[str, pd.DataFrame | dict], 
     return None
 
 
-def resolve_metric_value(code: str, datasets: Dict[str, pd.DataFrame | dict], cache: dict) -> Optional[float]:
-    """Atsineša arba apskaičiuoja rodiklio reikšmę pagal YFINANCE_SERIJOS."""
+def get_metric_value(code: Optional[str], datasets: Dict[str, pd.DataFrame | dict], cache: dict) -> Optional[float]:
+    """Pagal kodą grąžina rodiklio reikšmę (iš žodyno)."""
 
     if code is None:
         return None
-
     if code in cache:
         return cache[code]
 
@@ -121,19 +121,10 @@ def resolve_metric_value(code: str, datasets: Dict[str, pd.DataFrame | dict], ca
         cache[code] = None
         return None
 
-    source = meta.get("source")
-    value: Optional[float] = None
-
-    if source == "fast_info":
-        value = datasets.get("fast_info", {}).get(meta.get("field"))
-    elif source == "info":
-        value = datasets.get("info", {}).get(meta.get("field"))
-    elif source in {"income_stmt", "balance_sheet", "cash_flow"}:
-        df = datasets.get(source)
-        if isinstance(df, pd.DataFrame):
-            value = extract_statement_value(df, meta.get("field"))
-    elif source == "derived":
-        value = compute_derived_value(meta, datasets, cache)
+    if meta.get("type") == "raw":
+        value = raw_metric_value(meta, datasets)
+    else:
+        value = formula_metric_value(meta, datasets, cache)
 
     if value is not None:
         try:
@@ -145,8 +136,8 @@ def resolve_metric_value(code: str, datasets: Dict[str, pd.DataFrame | dict], ca
     return value
 
 
-def format_metric_value(value: Optional[float], meta: dict) -> str:
-    """Gražiai suformatuoja skaičių pagal apibrėžimą žodyne."""
+def format_metric(value: Optional[float], meta: dict) -> str:
+    """Gražiai suformatuoja skaičių spausdinimui."""
 
     if value is None:
         return "N/A"
@@ -158,18 +149,19 @@ def format_metric_value(value: Optional[float], meta: dict) -> str:
         return f"{value:,.{precision}f}"
     if fmt == "percent":
         return f"{value:,.{precision}f}%"
-    if fmt == "number":
-        return f"{value:,.{precision}f}"
-
-    return str(value)
+    return f"{value:,.{precision}f}"
 
 
-def create_summary_dataframe(
+# ---------------------------------------------------------------------------
+# Suvestinės ir eksportas
+# ---------------------------------------------------------------------------
+
+def build_summary_dataframe(
     ticker: str, metrics: Optional[Sequence[str]] = None
-) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame | dict], Dict[str, Optional[float]]]:
-    """Sudaro pagrindinę suvestinę DataFrame formatu."""
+) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame | dict]]:
+    """Grąžina suvestinę (DataFrame) ir visus atsisiųstus duomenis."""
 
-    datasets = fetch_company_datasets(ticker)
+    datasets = download_company_data(ticker)
     codes = list(metrics or sarasai.DEFAULT_SUMMARY_METRICS)
     cache: Dict[str, Optional[float]] = {}
 
@@ -178,130 +170,124 @@ def create_summary_dataframe(
         meta = YFINANCE_SERIJOS.get(code)
         if not meta:
             continue
-        value = resolve_metric_value(code, datasets, cache)
+        value = get_metric_value(code, datasets, cache)
         rows.append(
             {
-                "Kategorija": meta.get("category", "Kita"),
+                "Kategorija": meta.get("group", "Kita"),
                 "Rodiklis": meta.get("label", code),
-                "Reikšmė": format_metric_value(value, meta),
+                "Reikšmė": format_metric(value, meta),
             }
         )
 
     df = pd.DataFrame(rows)
-    return df, datasets, cache
+    return df, datasets
 
 
-def export_summary_to_excel(df: pd.DataFrame, ticker: str, filename: Optional[str] = None) -> Path:
-    """Išsaugo suvestinę Excel faile."""
+def export_to_excel(df: pd.DataFrame, ticker: str, filename: Optional[str] = None) -> Path:
+    """Išsaugo lentelę Excel formatu."""
 
     ensure_dir(EXPORT_DIR)
-    clean_filename = filename or f"{ticker}_santrauka.xlsx"
-    path = EXPORT_DIR / clean_filename
-    df.to_excel(path, index=False)
-    return path
+    output = EXPORT_DIR / (filename or f"{ticker}_santrauka.xlsx")
+    df.to_excel(output, index=False)
+    return output
 
 
-def statement_to_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Paverčia yfinance transponuotą ataskaitą į patogesnę formą."""
+def print_summary(df: pd.DataFrame, ticker: str) -> None:
+    """Aiškiai atspausdina lentelę konsolėje."""
 
-    if df is None or df.empty:
-        return pd.DataFrame()
-    tidy = df.T.copy()
-    tidy.index = pd.to_datetime(tidy.index)
-    tidy.index.name = "Periodas"
-    return tidy
+    separator = "=" * 70
+    print(f"\n{separator}\n📊 {ticker} SANTRAUKA\n{separator}")
+    print(df.to_string(index=False))
 
 
-def get_metric_series_for_plot(
+# ---------------------------------------------------------------------------
+# Grafikai
+# ---------------------------------------------------------------------------
+
+def statement_series_for_plot(
     metric_code: str, datasets: Dict[str, pd.DataFrame | dict]
 ) -> Optional[pd.Series]:
-    """Paruošia metrikos laiko eilutę grafiko braižymui."""
+    """Paverčia pasirinktą metriką į laiko eilutę grafikui."""
 
     meta = YFINANCE_SERIJOS.get(metric_code)
     if not meta or not meta.get("plot"):
         return None
 
-    source = meta.get("source")
-    df = datasets.get(source)
-    if not isinstance(df, pd.DataFrame) or meta.get("field") not in df.index:
+    statement = datasets.get(meta.get("source"))
+    if not isinstance(statement, pd.DataFrame):
         return None
 
-    series = df.loc[meta["field"]].dropna()
+    field = meta.get("field")
+    if field not in statement.index:
+        return None
+
+    series = statement.loc[field].dropna()
     if series.empty:
         return None
 
     series.index = pd.to_datetime(series.index)
-    series = series.sort_index()
-    return series
+    return series.sort_index()
 
 
-def plot_metrics_for_ticker(
+def plot_metrics(
     ticker: str,
     metrics: Sequence[str],
     years: Tuple[int, int],
     datasets: Optional[Dict[str, pd.DataFrame | dict]] = None,
 ) -> Optional[Path]:
-    """Braižo iki dviejų metrikų grafiką ir išsaugo PNG faile."""
+    """Braižo iki dviejų rodiklių grafiką ir grąžina failo kelią."""
 
-    datasets = datasets or fetch_company_datasets(ticker)
-    start_year, end_year = years
-    prepared_series = []
+    datasets = datasets or download_company_data(ticker)
+    prepared = []
 
     for code in metrics[:2]:
-        series = get_metric_series_for_plot(code, datasets)
+        series = statement_series_for_plot(code, datasets)
         if series is None:
-            print(f"❌ Nepavyko rasti duomenų metrikoje {code}")
+            print(f"❌ {code} neturi pakankamai duomenų grafiko braižymui.")
             continue
-        filtered = series[(series.index.year >= start_year) & (series.index.year <= end_year)]
+        mask = (series.index.year >= years[0]) & (series.index.year <= years[1])
+        filtered = series[mask]
         if filtered.empty:
-            print(f"❌ {code} neturi duomenų nurodytam laikotarpiui")
+            print(f"❌ {code} neturi duomenų tarp {years[0]}–{years[1]} m.")
             continue
-        prepared_series.append((code, filtered))
+        prepared.append((code, filtered))
 
-    if not prepared_series:
+    if not prepared:
         return None
 
     ensure_dir(PLOTS_DIR)
     fig, ax = plt.subplots(figsize=(10, 5))
     secondary_ax = None
 
-    for idx, (code, series) in enumerate(prepared_series):
-        meta = YFINANCE_SERIJOS[code]
-        if idx == 0:
-            ax.plot(series.index.year, series.values, label=meta["label"], color="#2f80ed")
-            ax.set_xlabel("Metai")
-            ax.set_ylabel(meta["label"])
-        else:
-            secondary_ax = ax.twinx()
-            secondary_ax.plot(
-                series.index.year,
-                series.values,
-                label=meta["label"],
-                color="#eb5757",
-            )
-            secondary_ax.set_ylabel(meta["label"])
+    for idx, (code, series) in enumerate(prepared):
+        label = YFINANCE_SERIJOS[code]["label"]
+        axis = ax if idx == 0 else ax.twinx()
+        axis.plot(series.index.year, series.values, label=label)
+        axis.set_ylabel(label)
+        secondary_ax = axis if idx == 1 else secondary_ax
 
-    title_metrics = " ir ".join([YFINANCE_SERIJOS[m]["label"] for m, _ in prepared_series])
-    ax.set_title(f"{ticker}: {title_metrics}")
+    ax.set_xlabel("Metai")
+    title = " ir ".join(YFINANCE_SERIJOS[c]["label"] for c, _ in prepared)
+    ax.set_title(f"{ticker}: {title}")
 
     handles, labels = ax.get_legend_handles_labels()
-    if secondary_ax:
+    if secondary_ax and secondary_ax is not ax:
         h2, l2 = secondary_ax.get_legend_handles_labels()
-        handles.extend(h2)
-        labels.extend(l2)
+        handles += h2
+        labels += l2
     ax.legend(handles, labels, loc="best")
 
-    filename = f"{ticker}_{'_'.join(m for m, _ in prepared_series)}_{start_year}_{end_year}.png"
-    output_path = PLOTS_DIR / filename
+    filename = f"{ticker}_{'_'.join(code for code, _ in prepared)}_{years[0]}_{years[1]}.png"
+    output = PLOTS_DIR / filename
     fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
+    fig.savefig(output, dpi=300)
     plt.close(fig)
 
-    return output_path
+    return output
 
 
-def parse_plot_arguments(args: Sequence[str]) -> Tuple[List[str], List[str], List[int]]:
-    """Atskiria ticker'ius, metrikas ir metus iš pateikto sąrašo."""
+def read_plot_arguments(args: Sequence[str]) -> Tuple[List[str], List[str], List[int]]:
+    """Atskiriame ticker'ius, metrikas ir metus."""
 
     tickers: List[str] = []
     metrics: List[str] = []
@@ -314,7 +300,6 @@ def parse_plot_arguments(args: Sequence[str]) -> Tuple[List[str], List[str], Lis
         if cleaned.isdigit():
             years.append(int(cleaned))
             continue
-
         upper = cleaned.upper()
         if upper in sarasai.PLOT_METRIC_CHOICES:
             metrics.append(upper)
@@ -324,31 +309,29 @@ def parse_plot_arguments(args: Sequence[str]) -> Tuple[List[str], List[str], Lis
     return tickers, metrics, years
 
 
-def prompt_plot_flow() -> None:
-    """Surinka argumentus grafiko generavimui, primindama apie sąrašus."""
+def plot_flow() -> None:
+    """Vartotojo sąsaja grafikams generuoti."""
 
-    print("\n📈 Galimi grafiko rodikliai:")
+    print("\n📈 Galimi rodikliai grafikams:")
     print(", ".join(sarasai.PLOT_METRIC_CHOICES))
     user_input = input(
-        "\nĮveskite ticker'ius, metrikas ir (nebūtinai) metus, pvz. AAPL,MSFT,REVENUE,NET_INCOME,2015,2024: "
+        "Įveskite argumentus (pvz. AAPL,MSFT,REVENUE,NET_INCOME,2015,2024): "
     )
 
-    if not user_input.strip():
-        print("Naudojamas pavyzdinis argumentų sąrašas.")
-        args = sarasai.ARGUMENTU_PAVYZDYS
-    else:
-        args = [item.strip() for item in user_input.split(",") if item.strip()]
+    args = (
+        [chunk.strip() for chunk in user_input.split(",") if chunk.strip()]
+        if user_input.strip()
+        else sarasai.ARGUMENTU_PAVYZDYS
+    )
 
-    tickers, metrics, years = parse_plot_arguments(args)
+    tickers, metrics, years = read_plot_arguments(args)
 
     if not metrics:
-        print("❌ Nenurodėte nė vieno rodiklio.")
+        print("❌ Nenurodėte rodiklių.")
         return
-
     if len(metrics) > 2:
-        print("⚠️ Naudosime tik pirmus du rodiklius grafike.")
+        print("⚠️ Naudosime tik pirmus du rodiklius.")
         metrics = metrics[:2]
-
     if not tickers:
         print("❌ Nenurodėte nė vieno ticker.")
         return
@@ -358,75 +341,79 @@ def prompt_plot_flow() -> None:
     elif len(years) == 1:
         years.append(date.today().year)
 
-    start_year, end_year = min(years), max(years)
+    year_range = (min(years), max(years))
 
     for ticker in tickers[:2]:
         print(f"\n🎯 Generuojamas grafikas {ticker}...")
-        datasets = fetch_company_datasets(ticker)
-        output = plot_metrics_for_ticker(ticker, metrics, (start_year, end_year), datasets)
+        datasets = download_company_data(ticker)
+        output = plot_metrics(ticker, metrics, year_range, datasets)
         if output:
             print(f"💾 Grafikas išsaugotas: {output}")
         else:
             print("❌ Nepavyko suformuoti grafiko.")
 
 
-def show_raw_statements(ticker: str) -> None:
-    """Atspausdina pagrindinius finansinius DataFrame'us."""
+# ---------------------------------------------------------------------------
+# Papildomi veiksmai (raw statement'ai)
+# ---------------------------------------------------------------------------
 
-    datasets = fetch_company_datasets(ticker)
-    income = statement_to_dataframe(datasets.get("income_stmt"))
-    balance = statement_to_dataframe(datasets.get("balance_sheet"))
-    cash = statement_to_dataframe(datasets.get("cash_flow"))
+def print_statements(ticker: str) -> None:
+    """Parodo pagrindines finansines ataskaitas."""
 
-    print(f"\n{'=' * 70}\n💵 PAJAMŲ ATASKAITA\n{'=' * 70}")
-    print(income.head() if not income.empty else "Nėra duomenų")
+    datasets = download_company_data(ticker)
 
-    print(f"\n{'=' * 70}\n💼 BALANSAS\n{'=' * 70}")
-    print(balance.head() if not balance.empty else "Nėra duomenų")
+    def show(title: str, df: pd.DataFrame) -> None:
+        separator = "=" * 70
+        print(f"\n{separator}\n{title}\n{separator}")
+        print(df.T.head() if not df.empty else "Nėra duomenų")
 
-    print(f"\n{'=' * 70}\n💸 PINIGŲ SRAUTAI\n{'=' * 70}")
-    print(cash.head() if not cash.empty else "Nėra duomenų")
+    show("💵 PAJAMŲ ATASKAITA", datasets.get("income_stmt", pd.DataFrame()))
+    show("💼 BALANSAS", datasets.get("balance_sheet", pd.DataFrame()))
+    show("💸 PINIGŲ SRAUTAI", datasets.get("cash_flow", pd.DataFrame()))
 
 
-def summary_flow(to_excel: bool = False) -> None:
-    """Apdoroja vartotojo įvestį su santrauka ir (jei reikia) eksportu."""
+# ---------------------------------------------------------------------------
+# Vartotojo meniu
+# ---------------------------------------------------------------------------
+
+def handle_summary_flow(export: bool) -> None:
+    """Klausiam ticker ir parodome suvestinę, optional eksportas."""
 
     ticker = input("\nĮveskite ticker (pvz. AAPL): ").strip().upper()
     if not ticker:
         print("❌ Ticker privalomas.")
         return
 
-    summary_df, _, _ = create_summary_dataframe(ticker)
+    summary_df, _ = build_summary_dataframe(ticker)
+    print_summary(summary_df, ticker)
 
-    print(f"\n{'=' * 70}\n📊 {ticker} SANTRAUKA\n{'=' * 70}")
-    print(summary_df.to_string(index=False))
-
-    if to_excel:
-        filename = input("Failo pavadinimas (palikite tuščią numatytajam): ").strip()
-        path = export_summary_to_excel(summary_df, ticker, filename or None)
-        print(f"\n💾 Suvestinė išsaugota faile: {path}")
+    if export:
+        filename = input("Failo pavadinimas (palikite tuščią, jei tinka numatytasis): ").strip()
+        path = export_to_excel(summary_df, ticker, filename or None)
+        print(f"💾 Suvestinė įrašyta: {path}")
 
 
 def main() -> None:
-    print("\n" + "=" * 70)
+    separator = "=" * 70
+    print("\n" + separator)
     print("📊 ĮMONIŲ ANALIZĖ SU YFINANCE")
-    print("=" * 70)
-    print("✅ Duomenys konvertuojami į pandas DataFrame")
-    print("✅ Įmanoma eksportuoti į Excel")
-    print("✅ Galima generuoti grafikus")
+    print(separator)
+    print("✅ Duomenis pateikiame pandas DataFrame formatu")
+    print("✅ Galima eksportuoti į Excel failą")
+    print("✅ Galima sugeneruoti grafikus")
 
     menu = (
         "\n1 - Įmonės santrauka",
-        "2 - Santrauką eksportuoti į Excel",
+        "2 - Įmonės santrauka + eksportas",
         "3 - Suformuoti grafikus",
-        "4 - Peržiūrėti žalius finansinius duomenis",
+        "4 - Parodyti žalius finansinius duomenis",
         "0 - Išeiti",
     )
 
     while True:
-        print("\n" + "=" * 70)
+        print("\n" + separator)
         print("MENIU")
-        print("=" * 70)
+        print(separator)
         for line in menu:
             print(line)
 
@@ -436,15 +423,15 @@ def main() -> None:
             print("\n👋 Iki!")
             break
         if choice == "1":
-            summary_flow(to_excel=False)
+            handle_summary_flow(export=False)
         elif choice == "2":
-            summary_flow(to_excel=True)
+            handle_summary_flow(export=True)
         elif choice == "3":
-            prompt_plot_flow()
+            plot_flow()
         elif choice == "4":
-            ticker = input("\nĮveskite ticker, kurio ataskaitas rodyti: ").strip().upper()
+            ticker = input("Įveskite ticker: ").strip().upper()
             if ticker:
-                show_raw_statements(ticker)
+                print_statements(ticker)
             else:
                 print("❌ Ticker privalomas.")
         else:
