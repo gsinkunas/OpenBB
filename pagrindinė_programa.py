@@ -1,311 +1,391 @@
-from openbb import obb
+"""Automatinis skriptas, kuris naudoja yfinance fundamentiniams duomenims
+surinkti ir viską tiesiogiai išsaugo į Excel failus (be jokio meniu).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Optional, Sequence
+
 import pandas as pd
+import yfinance as yf
+
+# ---------------------------------------------------------------------------
+# Konfigūracija (koreguokite pagal poreikį)
+# ---------------------------------------------------------------------------
+
+DEFAULT_TICKERS = ["AAPL", "MSFT", "GOOGL"]
+EXPORT_DIR = Path("eksportai")
+SUMMARY_METRICS = [
+    "PRICE",
+    "MARKET_CAP",
+    "REVENUE",
+    "NET_INCOME",
+    "EPS",
+    "PE_RATIO",
+    "ROE",
+    "ROA",
+    "NET_MARGIN",
+    "EBITDA",
+    "OPERATING_CASH_FLOW",
+    "FREE_CASH_FLOW",
+    "TOTAL_ASSETS",
+    "TOTAL_EQUITY",
+    "TOTAL_DEBT",
+    "CURRENT_RATIO",
+    "DEBT_TO_EQUITY",
+]
+
+YFINANCE_SERIES = {
+    "PRICE": {
+        "label": "Dabartinė kaina ($)",
+        "group": "Kaina",
+        "type": "raw",
+        "source": "fast_info",
+        "field": "lastPrice",
+        "format": "usd",
+        "precision": 2,
+    },
+    "MARKET_CAP": {
+        "label": "Kapitalizacija ($)",
+        "group": "Kaina",
+        "type": "raw",
+        "source": "fast_info",
+        "field": "marketCap",
+        "format": "usd",
+        "precision": 0,
+    },
+    "EPS": {
+        "label": "EPS",
+        "group": "Pelningumas",
+        "type": "raw",
+        "source": "info",
+        "field": "trailingEps",
+        "format": "number",
+        "precision": 2,
+    },
+    "REVENUE": {
+        "label": "Pajamos ($)",
+        "group": "Augimas",
+        "type": "raw",
+        "source": "income_stmt",
+        "field": "Total Revenue",
+        "format": "usd",
+        "precision": 0,
+    },
+    "NET_INCOME": {
+        "label": "Grynasis pelnas ($)",
+        "group": "Augimas",
+        "type": "raw",
+        "source": "income_stmt",
+        "field": "Net Income",
+        "format": "usd",
+        "precision": 0,
+    },
+    "EBITDA": {
+        "label": "EBITDA ($)",
+        "group": "Pelningumas",
+        "type": "raw",
+        "source": "income_stmt",
+        "field": "Ebitda",
+        "format": "usd",
+        "precision": 0,
+    },
+    "OPERATING_CASH_FLOW": {
+        "label": "Operacinis pinigų srautas ($)",
+        "group": "Pinigų srautai",
+        "type": "raw",
+        "source": "cash_flow",
+        "field": "Total Cash From Operating Activities",
+        "format": "usd",
+        "precision": 0,
+    },
+    "TOTAL_ASSETS": {
+        "label": "Turtas ($)",
+        "group": "Balansas",
+        "type": "raw",
+        "source": "balance_sheet",
+        "field": "Total Assets",
+        "format": "usd",
+        "precision": 0,
+    },
+    "TOTAL_DEBT": {
+        "label": "Visos skolos ($)",
+        "group": "Balansas",
+        "type": "raw",
+        "source": "balance_sheet",
+        "field": "Total Debt",
+        "format": "usd",
+        "precision": 0,
+    },
+    "TOTAL_EQUITY": {
+        "label": "Nuosavas kapitalas ($)",
+        "group": "Balansas",
+        "type": "raw",
+        "source": "balance_sheet",
+        "field": "Total Stockholder Equity",
+        "format": "usd",
+        "precision": 0,
+    },
+    "FREE_CASH_FLOW": {
+        "label": "Laisvas pinigų srautas ($)",
+        "group": "Pinigų srautai",
+        "type": "formula",
+        "method": "sum",
+        "operands": ["OPERATING_CASH_FLOW"],
+        "format": "usd",
+        "precision": 0,
+    },
+    "PE_RATIO": {
+        "label": "P/E",
+        "group": "Vertinimas",
+        "type": "formula",
+        "method": "divide",
+        "numerator": "PRICE",
+        "denominator": "EPS",
+        "format": "number",
+        "precision": 2,
+    },
+    "ROE": {
+        "label": "ROE (%)",
+        "group": "Pelningumas",
+        "type": "formula",
+        "method": "divide",
+        "numerator": "NET_INCOME",
+        "denominator": "TOTAL_EQUITY",
+        "multiplier": 100,
+        "format": "percent",
+        "precision": 2,
+    },
+    "ROA": {
+        "label": "ROA (%)",
+        "group": "Pelningumas",
+        "type": "formula",
+        "method": "divide",
+        "numerator": "NET_INCOME",
+        "denominator": "TOTAL_ASSETS",
+        "multiplier": 100,
+        "format": "percent",
+        "precision": 2,
+    },
+    "NET_MARGIN": {
+        "label": "Grynojo pelno marža (%)",
+        "group": "Pelningumas",
+        "type": "formula",
+        "method": "divide",
+        "numerator": "NET_INCOME",
+        "denominator": "REVENUE",
+        "multiplier": 100,
+        "format": "percent",
+        "precision": 2,
+    },
+    "CURRENT_RATIO": {
+        "label": "Current Ratio",
+        "group": "Likvidumas",
+        "type": "formula",
+        "method": "divide",
+        "numerator": "TOTAL_ASSETS",
+        "denominator": "TOTAL_DEBT",
+        "format": "number",
+        "precision": 2,
+    },
+    "DEBT_TO_EQUITY": {
+        "label": "Debt/Equity",
+        "group": "Skolos",
+        "type": "formula",
+        "method": "divide",
+        "numerator": "TOTAL_DEBT",
+        "denominator": "TOTAL_EQUITY",
+        "format": "number",
+        "precision": 2,
+    },
+}
 
 
-def gauti_imones_duomenis(ticker):
-    """
-    Gauna visus svarbiausius įmonės duomenis ir grąžina kaip pandas DataFrame
-    """
+# ---------------------------------------------------------------------------
+# Pagalbinės funkcijos
+# ---------------------------------------------------------------------------
 
-    print(f"\nGaunami duomenys apie {ticker}")
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
 
-    # === 1. KAINA IR RINKA ===
-    quote = obb.equity.price.quote(symbol=ticker, provider="yfinance")
-    quote_df = quote.to_dataframe()
 
-    # === 2. BALANSAS ===
-    balance = obb.equity.fundamental.balance(symbol=ticker, provider="yfinance", period="annual", limit=1)
-    balance_df = balance.to_dataframe()
+def download_company_data(ticker: str) -> Dict[str, pd.DataFrame | dict]:
+    ticker_obj = yf.Ticker(ticker)
+    fast_info = getattr(ticker_obj, "fast_info", {}) or {}
+    try:
+        info = ticker_obj.get_info()
+    except Exception:
+        info = {}
 
-    # === 3. PAJAMŲ ATASKAITA ===
-    income = obb.equity.fundamental.income(symbol=ticker, provider="yfinance", period="annual", limit=2)
-    income_df = income.to_dataframe()
-
-    # === 4. PINIGŲ SRAUTAI ===
-    cashflow = obb.equity.fundamental.cash(symbol=ticker, provider="yfinance", period="annual", limit=1)
-    cashflow_df = cashflow.to_dataframe()
-
-    print("Duomenys gauti!")
+    def to_df(data: object) -> pd.DataFrame:
+        return data if isinstance(data, pd.DataFrame) else pd.DataFrame()
 
     return {
-        'kaina': quote_df,
-        'balansas': balance_df,
-        'pajamos': income_df,
-        'cf': cashflow_df
+        "fast_info": fast_info,
+        "info": info,
+        "income_stmt": to_df(ticker_obj.financials),
+        "balance_sheet": to_df(ticker_obj.balance_sheet),
+        "cash_flow": to_df(ticker_obj.cashflow),
     }
 
 
-def sukurti_santrauka(ticker):
-    """
-    Sukuria vieną DataFrame su svarbiausiais rodikliais
-    """
-
-    duomenys = gauti_imones_duomenis(ticker)
-
-    # Ištraukiame duomenis
-    kaina_df = duomenys['kaina']
-    balance_df = duomenys['balansas']
-    income_df = duomenys['pajamos']
-    cf_df = duomenys['cf']
-
-    # Imame naujausius duomenis - SAUGIAI
-    dabartine_kaina = kaina_df['last_price'].iloc[0] if 'last_price' in kaina_df.columns else None
-    market_cap = kaina_df['market_cap'].iloc[0] if 'market_cap' in kaina_df.columns else None
-
-    # Jei nėra market_cap, bandome apskaičiuoti
-    if market_cap is None:
-        print("Market cap nerastas, bandome apskaičiuoti")
-        # market_cap = kaina * akcijų skaičius (jei turime)
-
-    # Balansas
-    turtas = balance_df['total_assets'].iloc[0] if 'total_assets' in balance_df.columns else 0
-    skolos = balance_df['total_debt'].iloc[0] if 'total_debt' in balance_df.columns else 0
-    nuosavas_kapitalas = balance_df['total_equity'].iloc[0] if 'total_equity' in balance_df.columns else 0
-    grynieji = balance_df['cash_and_cash_equivalents'].iloc[
-        0] if 'cash_and_cash_equivalents' in balance_df.columns else 0
-    trumpalaikis_turtas = balance_df['total_current_assets'].iloc[
-        0] if 'total_current_assets' in balance_df.columns else 0
-    trumpalaikes_skolos = balance_df['total_current_liabilities'].iloc[
-        0] if 'total_current_liabilities' in balance_df.columns else 0
-
-    # Pajamos (dabartinės ir praėjusių metų)
-    pajamos_dabar = income_df['revenue'].iloc[0] if 'revenue' in income_df.columns else 0
-    pajamos_praeita = income_df['revenue'].iloc[1] if len(income_df) > 1 and 'revenue' in income_df.columns else 0
-    ebitda = income_df['ebitda'].iloc[0] if 'ebitda' in income_df.columns else 0
-    grynasis_pelnas = income_df['net_income'].iloc[0] if 'net_income' in income_df.columns else 0
-    bendrasis_pelnas = income_df['gross_profit'].iloc[0] if 'gross_profit' in income_df.columns else 0
-    eps = income_df['eps'].iloc[0] if 'eps' in income_df.columns else 0
-
-    # Cash Flow
-    operacinis_cf = cf_df['operating_cash_flow'].iloc[0] if 'operating_cash_flow' in cf_df.columns else 0
-    laisvas_cf = cf_df['free_cash_flow'].iloc[0] if 'free_cash_flow' in cf_df.columns else 0
-
-    # === SKAIČIUOJAME SANTYKIUS ===
-    pe_ratio = dabartine_kaina / eps if eps else None
-    revenue_growth = ((pajamos_dabar / pajamos_praeita) - 1) * 100 if pajamos_praeita else None
-    current_ratio = trumpalaikis_turtas / trumpalaikes_skolos if trumpalaikes_skolos else None
-    debt_to_equity = skolos / nuosavas_kapitalas if nuosavas_kapitalas else None
-    roe = (grynasis_pelnas / nuosavas_kapitalas) * 100 if nuosavas_kapitalas else None
-    roa = (grynasis_pelnas / turtas) * 100 if turtas else None
-    gross_margin = (bendrasis_pelnas / pajamos_dabar) * 100 if pajamos_dabar else None
-    net_margin = (grynasis_pelnas / pajamos_dabar) * 100 if pajamos_dabar else None
-    debt_to_ebitda = skolos / ebitda if ebitda else None
-
-    # === KURIAME DATAFRAME ===
-    santrauka = pd.DataFrame({
-        'Rodiklis': [
-            '=== KAINA ===',
-            'Dabartinė kaina ($)',
-            'Kapitalizacija ($)',
-            '',
-            '=== AUGIMAS ===',
-            'Pajamos ($)',
-            'Revenue Growth (%)',
-            'Grynasis pelnas ($)',
-            'EBITDA ($)',
-            'EPS ($)',
-            '',
-            '=== PELNINGUMAS ===',
-            'ROE (%)',
-            'ROA (%)',
-            'Gross Margin (%)',
-            'Net Margin (%)',
-            '',
-            '=== LIKVIDUMAS ===',
-            'Current Ratio',
-            'Grynieji pinigai ($)',
-            '',
-            '=== SKOLA ===',
-            'Debt to Equity',
-            'Debt to EBITDA',
-            'Viso skolos ($)',
-            '',
-            '=== PINIGŲ SRAUTAI ===',
-            'Operacinis CF ($)',
-            'Laisvas CF ($)',
-            '',
-            '=== BALANSAS ===',
-            'Turtas ($)',
-            'Nuosavas kapitalas ($)'
-        ],
-        'Reikšmė': [
-            '',
-            f'{dabartine_kaina:.2f}' if dabartine_kaina else 'N/A',
-            f'{market_cap:,.0f}' if market_cap else 'N/A',
-            '',
-            '',
-            f'{pajamos_dabar:,.0f}' if pajamos_dabar else 'N/A',
-            f'{revenue_growth:.2f}' if revenue_growth else 'N/A',
-            f'{grynasis_pelnas:,.0f}' if grynasis_pelnas else 'N/A',
-            f'{ebitda:,.0f}' if ebitda else 'N/A',
-            f'{eps:.2f}' if eps else 'N/A',
-            '',
-            '',
-            f'{roe:.2f}' if roe else 'N/A',
-            f'{roa:.2f}' if roa else 'N/A',
-            f'{gross_margin:.2f}' if gross_margin else 'N/A',
-            f'{net_margin:.2f}' if net_margin else 'N/A',
-            '',
-            '',
-            f'{current_ratio:.2f}' if current_ratio else 'N/A',
-            f'{grynieji:,.0f}' if grynieji else 'N/A',
-            '',
-            '',
-            f'{debt_to_equity:.2f}' if debt_to_equity else 'N/A',
-            f'{debt_to_ebitda:.2f}' if debt_to_ebitda else 'N/A',
-            f'{skolos:,.0f}' if skolos else 'N/A',
-            '',
-            '',
-            f'{operacinis_cf:,.0f}' if operacinis_cf else 'N/A',
-            f'{laisvas_cf:,.0f}' if laisvas_cf else 'N/A',
-            '',
-            '',
-            f'{turtas:,.0f}' if turtas else 'N/A',
-            f'{nuosavas_kapitalas:,.0f}' if nuosavas_kapitalas else 'N/A'
-        ]
-    })
-
-    return santrauka
+def newest_statement_value(statement: pd.DataFrame, field: str) -> Optional[float]:
+    if statement is None or statement.empty or field not in statement.index:
+        return None
+    series = statement.loc[field].dropna()
+    return float(series.iloc[0]) if not series.empty else None
 
 
-def palyginti_imones(tickers):
-    """
-    Palygina kelias įmones ir grąžina DataFrame
-    """
+def raw_metric_value(meta: dict, datasets: Dict[str, pd.DataFrame | dict]) -> Optional[float]:
+    source = meta.get("source")
+    field = meta.get("field")
 
-    palyginimo_duomenys = []
+    if source in {"fast_info", "info"}:
+        return datasets.get(source, {}).get(field)
+
+    statement = datasets.get(source)
+    if isinstance(statement, pd.DataFrame):
+        return newest_statement_value(statement, field)
+
+    return None
+
+
+def formula_metric_value(meta: dict, datasets: Dict[str, pd.DataFrame | dict], cache: dict) -> Optional[float]:
+    method = meta.get("method")
+
+    if method == "divide":
+        numerator = get_metric_value(meta.get("numerator"), datasets, cache)
+        denominator = get_metric_value(meta.get("denominator"), datasets, cache)
+        if numerator is None or denominator in (None, 0):
+            return None
+        multiplier = meta.get("multiplier", 1)
+        return float(numerator) / float(denominator) * multiplier
+
+    if method == "sum":
+        operands = meta.get("operands", [])
+        values = [get_metric_value(code, datasets, cache) for code in operands]
+        if any(value is None for value in values):
+            return None
+        return float(sum(values))
+
+    return None
+
+
+def get_metric_value(code: Optional[str], datasets: Dict[str, pd.DataFrame | dict], cache: dict) -> Optional[float]:
+    if not code:
+        return None
+    if code in cache:
+        return cache[code]
+
+    meta = YFINANCE_SERIES.get(code)
+    if not meta:
+        cache[code] = None
+        return None
+
+    if meta.get("type") == "raw":
+        value = raw_metric_value(meta, datasets)
+    else:
+        value = formula_metric_value(meta, datasets, cache)
+
+    if value is not None:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = None
+
+    cache[code] = value
+    return value
+
+
+def format_metric(value: Optional[float], meta: dict) -> str:
+    if value is None:
+        return "N/A"
+    fmt = meta.get("format", "number")
+    precision = meta.get("precision", 2)
+
+    if fmt == "usd":
+        return f"{value:,.{precision}f}"
+    if fmt == "percent":
+        return f"{value:,.{precision}f}%"
+    return f"{value:,.{precision}f}"
+
+
+def tidy_statement(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    tidy = df.T.copy()
+    tidy.index = pd.to_datetime(tidy.index)
+    tidy.index.name = "Periodas"
+    return tidy.sort_index()
+
+
+# ---------------------------------------------------------------------------
+# Eksportas
+# ---------------------------------------------------------------------------
+
+def build_summary_dataframe(ticker: str) -> tuple[pd.DataFrame, Dict[str, pd.DataFrame | dict]]:
+    datasets = download_company_data(ticker)
+    cache: Dict[str, Optional[float]] = {}
+
+    rows = []
+    for code in SUMMARY_METRICS:
+        meta = YFINANCE_SERIES.get(code)
+        if not meta:
+            continue
+        value = get_metric_value(code, datasets, cache)
+        rows.append(
+            {
+                "Kategorija": meta.get("group", "Kita"),
+                "Rodiklis": meta.get("label", code),
+                "Reikšmė": value,
+                "Formatuota": format_metric(value, meta),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    return df, datasets
+
+
+def export_company_workbook(
+    ticker: str,
+    summary_df: pd.DataFrame,
+    datasets: Dict[str, pd.DataFrame | dict],
+    filename: Optional[str] = None,
+) -> Path:
+    ensure_dir(EXPORT_DIR)
+    output = EXPORT_DIR / (filename or f"{ticker}_fundamentalai.xlsx")
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, sheet_name="Santrauka", index=False)
+        tidy_statement(datasets.get("income_stmt")).to_excel(writer, sheet_name="Pajamos")
+        tidy_statement(datasets.get("balance_sheet")).to_excel(writer, sheet_name="Balansas")
+        tidy_statement(datasets.get("cash_flow")).to_excel(writer, sheet_name="Pinigų srautai")
+
+    return output
+
+
+def process_ticker(ticker: str) -> None:
+    print(f"\n🔄 Apdorojama {ticker}...")
+    summary_df, datasets = build_summary_dataframe(ticker)
+    if summary_df.empty:
+        print("❌ Nepavyko gauti duomenų.")
+        return
+    path = export_company_workbook(ticker, summary_df, datasets)
+    print(f"✅ Išsaugota: {path}")
+
+
+def export_all(tickers: Sequence[str]) -> None:
+    tickers = [t.strip().upper() for t in tickers if t.strip()]
+    if not tickers:
+        print("⚠️ Tuščias sąrašas – nieko neeksportuota.")
+        return
 
     for ticker in tickers:
-        try:
-            print(f"\n📊 Analizuojama: {ticker}")
+        process_ticker(ticker)
 
-            duomenys = gauti_imones_duomenis(ticker)
-
-            kaina_df = duomenys['kaina']
-            balance_df = duomenys['balansas']
-            income_df = duomenys['pajamos']
-
-            # Ištraukiame reikšmes SAUGIAI
-            dabartine_kaina = kaina_df['last_price'].iloc[0] if 'last_price' in kaina_df.columns else None
-            market_cap = kaina_df['market_cap'].iloc[0] if 'market_cap' in kaina_df.columns else None
-
-            turtas = balance_df['total_assets'].iloc[0] if 'total_assets' in balance_df.columns else 0
-            skolos = balance_df['total_debt'].iloc[0] if 'total_debt' in balance_df.columns else 0
-            nuosavas_kapitalas = balance_df['total_equity'].iloc[0] if 'total_equity' in balance_df.columns else 0
-
-            pajamos = income_df['revenue'].iloc[0] if 'revenue' in income_df.columns else 0
-            grynasis_pelnas = income_df['net_income'].iloc[0] if 'net_income' in income_df.columns else 0
-            eps = income_df['eps'].iloc[0] if 'eps' in income_df.columns else 0
-
-            # Santykiai
-            pe = dabartine_kaina / eps if eps else None
-            roe = (grynasis_pelnas / nuosavas_kapitalas) * 100 if nuosavas_kapitalas else None
-            debt_to_equity = skolos / nuosavas_kapitalas if nuosavas_kapitalas else None
-            net_margin = (grynasis_pelnas / pajamos) * 100 if pajamos else None
-
-            palyginimo_duomenys.append({
-                'Ticker': ticker,
-                'Kaina ($)': f'{dabartine_kaina:.2f}',
-                'Market Cap ($)': f'{market_cap:,.0f}',
-                'PE Ratio': f'{pe:.2f}' if pe else 'N/A',
-                'ROE (%)': f'{roe:.2f}' if roe else 'N/A',
-                'Debt/Equity': f'{debt_to_equity:.2f}' if debt_to_equity else 'N/A',
-                'Net Margin (%)': f'{net_margin:.2f}' if net_margin else 'N/A',
-                'Pajamos ($)': f'{pajamos:,.0f}',
-                'Pelnas ($)': f'{grynasis_pelnas:,.0f}'
-            })
-
-        except Exception as e:
-            print(f"❌ Klaida su {ticker}: {e}")
-
-    return pd.DataFrame(palyginimo_duomenys)
+    print("\n🎉 Baigta! Failų ieškokite kataloge 'eksportai'.")
 
 
-def eksportuoti_i_excel(df, ticker, failas="imones_analize.xlsx"):
-    """
-    Eksportuoja DataFrame į Excel failą
-    """
-    df.to_excel(failas, index=False, sheet_name=ticker)
-    print(f"\n💾 Duomenys išsaugoti į: {failas}")
-
-
-# === PROGRAMA ===
 if __name__ == "__main__":
-
-    print("\n" + "=" * 70)
-    print("📊 ĮMONIŲ ANALIZĖ SU PANDAS DATAFRAME")
-    print("=" * 70)
-    print("✅ Visi duomenys konvertuojami į pandas DataFrame")
-    print("✅ Lengva eksportuoti į Excel")
-    print("✅ Lengva analizuoti ir vizualizuoti")
-
-    while True:
-        print("\n" + "=" * 70)
-        print("MENIU")
-        print("=" * 70)
-        print("1 - Analizuoti vieną įmonę (santrauka)")
-        print("2 - Analizuoti vieną įmonę (visi DataFrame)")
-        print("3 - Palyginti kelias įmones")
-        print("4 - Eksportuoti į Excel")
-        print("0 - Išeiti")
-
-        choice = input("\nPasirinkimas: ").strip()
-
-        if choice == "0":
-            print("\n👋 Viso gero!")
-            break
-
-        elif choice == "1":
-            ticker = input("\nĮveskite ticker (pvz. AAPL): ").strip().upper()
-            santrauka_df = sukurti_santrauka(ticker)
-            print(f"\n{'=' * 70}")
-            print(f"📊 ĮMONĖS SANTRAUKA: {ticker}")
-            print(f"{'=' * 70}\n")
-            print(santrauka_df.to_string(index=False))
-
-        elif choice == "2":
-            ticker = input("\nĮveskite ticker (pvz. AAPL): ").strip().upper()
-            duomenys = gauti_imones_duomenis(ticker)
-
-            print(f"\n{'=' * 70}")
-            print("💰 KAINA")
-            print(f"{'=' * 70}")
-            print(duomenys['kaina'])
-
-            print(f"\n{'=' * 70}")
-            print("💼 BALANSAS")
-            print(f"{'=' * 70}")
-            print(duomenys['balansas'])
-
-            print(f"\n{'=' * 70}")
-            print("💵 PAJAMOS")
-            print(f"{'=' * 70}")
-            print(duomenys['pajamos'])
-
-            print(f"\n{'=' * 70}")
-            print("💸 CASH FLOW")
-            print(f"{'=' * 70}")
-            print(duomenys['cf'])
-
-        elif choice == "3":
-            tickers_input = input("\nĮveskite ticker'ius (pvz. AAPL,MSFT,GOOGL): ").strip().upper()
-            tickers = [t.strip() for t in tickers_input.split(",")]
-
-            palyginimas_df = palyginti_imones(tickers)
-
-            print(f"\n{'=' * 70}")
-            print("📊 ĮMONIŲ PALYGINIMAS")
-            print(f"{'=' * 70}\n")
-            print(palyginimas_df.to_string(index=False))
-
-        elif choice == "4":
-            ticker = input("\nĮveskite ticker (pvz. AAPL): ").strip().upper()
-            failas = input("Failo pavadinimas (pvz. apple.xlsx): ").strip()
-            if not failas:
-                failas = f"{ticker}_analize.xlsx"
-
-            santrauka_df = sukurti_santrauka(ticker)
-            eksportuoti_i_excel(santrauka_df, ticker, failas)
-
-        else:
-            print("❌ Neteisingas pasirinkimas!")
+    export_all(DEFAULT_TICKERS)
